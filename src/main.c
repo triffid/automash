@@ -27,6 +27,7 @@ struct input_event ie;
 
 #define MAX_EVENTS 8
 
+#define WRITE_BUFFER_COUNT 4
 int main(int argc, char** argv)
 {
     struct epoll_event ev;
@@ -120,9 +121,13 @@ int main(int argc, char** argv)
      * main loop
      */
     int nev;
+
+    struct input_event write_buffer[WRITE_BUFFER_COUNT];
+    int write_buffer_index = 0;
+
     for (;;)
     {
-        nev = epoll_wait(epfd, events, MAX_EVENTS, btnmask?20:-1);
+        nev = epoll_wait(epfd, events, MAX_EVENTS, btnmask?15:-1);
         if (nev == -1)
         {
             perror("epoll_wait");
@@ -157,56 +162,50 @@ int main(int argc, char** argv)
         if (btnmask & 1)
         {
             // issue left click
-            ie.type = EV_KEY;
-            ie.code = BTN_LEFT;
-            gettimeofday(&ie.time, NULL);
 
-            // send mouse down
-            ie.value = 1;
-            if (write(uifd, &ie, sizeof(ie)) < 0)
-                goto failexit;
+            // mouse down
+            write_buffer[write_buffer_index].type = EV_KEY;
+            write_buffer[write_buffer_index].code = BTN_LEFT;
+            gettimeofday(&write_buffer[write_buffer_index].time, NULL);
+            write_buffer[write_buffer_index].value = 1;
+            write_buffer_index++;
 
-            ie.time.tv_usec += 5000;
-            if (ie.time.tv_usec > 1000000)
-            {
-                ie.time.tv_sec++;
-                ie.time.tv_usec -= 1000000;
-            }
-
-            // send mouse up
-            ie.value = 0;
-            if (write(uifd, &ie, sizeof(ie)) < 0)
-                goto failexit;
+            // mouse release
+            write_buffer[write_buffer_index].type = EV_KEY;
+            write_buffer[write_buffer_index].code = BTN_LEFT;
+            gettimeofday(&write_buffer[write_buffer_index].time, NULL);
+            write_buffer[write_buffer_index].value = 0;
+            write_buffer_index++;
 
             printf("L");
         }
 
         if (btnmask & 2)
         {
-            // issue left click
-            ie.type = EV_KEY;
-            ie.code = BTN_RIGHT;
-            gettimeofday(&ie.time, NULL);
+            // issue right click
 
-            // send mouse down
-            ie.value = 1;
-            if (write(uifd, &ie, sizeof(ie)) < 0)
-                goto failexit;
+            // mouse down
+            write_buffer[write_buffer_index].type = EV_KEY;
+            write_buffer[write_buffer_index].code = BTN_RIGHT;
+            gettimeofday(&write_buffer[write_buffer_index].time, NULL);
+            write_buffer[write_buffer_index].value = 1;
+            write_buffer_index++;
 
-            ie.time.tv_usec += 5000;
-            if (ie.time.tv_usec > 1000000)
-            {
-                ie.time.tv_sec++;
-                ie.time.tv_usec -= 1000000;
-            }
-
-            // send mouse up
-            ie.value = 0;
-            if (write(uifd, &ie, sizeof(ie)) < 0)
-                goto failexit;
+            // mouse release
+            write_buffer[write_buffer_index].type = EV_KEY;
+            write_buffer[write_buffer_index].code = BTN_RIGHT;
+            gettimeofday(&write_buffer[write_buffer_index].time, NULL);
+            write_buffer[write_buffer_index].value = 0;
+            write_buffer_index++;
 
             printf("R");
         }
+
+        // send buffered events
+        if (write_buffer_index > 0)
+            if (write(uifd, write_buffer, sizeof(write_buffer[0]) * write_buffer_index) < 0)
+                goto failexit;
+        write_buffer_index = 0;
     }
 
     ioctl(uifd, UI_DEV_DESTROY);
@@ -218,6 +217,7 @@ int main(int argc, char** argv)
     return 0;
 
 failexit:
+    // FIXME: this is ugly as sin. I know it's wrong, I did it anyway, I'm  sorry
 
     if (uifd)
         ioctl(uifd, UI_DEV_DESTROY);
