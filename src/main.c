@@ -27,7 +27,60 @@ struct input_event ie;
 
 #define MAX_EVENTS 8
 
-#define WRITE_BUFFER_COUNT 4
+int time_increment_and_copy(struct timeval* time, struct timeval* buffer, unsigned int incr)
+{
+    if ((sizeof(incr) == 32) && (sizeof(time->tv_usec) == 32))
+    {
+        if ((time->tv_usec & 1UL<<31) && (incr & 1UL<<31))
+        {
+            // add will overflow and we won't know
+            // instead, subtract half maxint from each then add, and increment seconds
+            time->tv_usec = (time->tv_usec - (1UL<<31)) + (incr - (1UL<<31));
+            time->tv_sec ++;
+        }
+    }
+    else
+    {
+        // todo: error
+        return -1;
+    }
+
+    memcpy(buffer, time, sizeof(*time));
+
+    return 0;
+}
+
+void queue_event(int type, int code, int value, struct input_event* queue, int* queue_index, struct timeval* time)
+{
+    queue[*queue_index].type = type;
+    queue[*queue_index].code = code;
+    queue[*queue_index].value = value;
+
+    time_increment_and_copy(time, &queue[*queue_index].time, 2000000);
+
+    (*queue_index)++;
+}
+
+void failexit(const char* message) __attribute__ ((noreturn));
+void failexit(const char* message)
+{
+    if (uifd > 0)
+    {
+        ioctl(uifd, UI_DEV_DESTROY);
+        close(uifd);
+    }
+
+    if (mfd > 0)
+        close(mfd);
+
+    if (epfd > 0)
+        close(epfd);
+
+    perror(message);
+    exit(1);
+}
+
+#define WRITE_BUFFER_COUNT 64
 int main(int argc, char** argv)
 {
     struct epoll_event ev;
@@ -38,40 +91,21 @@ int main(int argc, char** argv)
      */
     mfd = open(MOUSEPATH, O_RDONLY);
     if (mfd < 0)
-    {
-        perror("Open " MOUSEPATH);
-        exit(1);
-    }
+        failexit("open " MOUSEPATH);
 
     /*
      * Event output
      */
     uifd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (uifd < 0)
-    {
-        perror("Open /dev/uinput");
-        exit(1);
-    }
+        failexit("open /dev/uinput");
 
-    if (ioctl(uifd, UI_SET_EVBIT, EV_KEY) < 0)
-    {
-        perror("ioctl:EV_KEY");
-        exit(1);
-    }
+    // tell uinput that we send mouse clicks
+    ioctl(uifd, UI_SET_EVBIT, EV_KEY);
+    ioctl(uifd, UI_SET_KEYBIT, BTN_LEFT);
+    ioctl(uifd, UI_SET_KEYBIT, BTN_RIGHT);
 
-    if (ioctl(uifd, UI_SET_KEYBIT, BTN_LEFT) < 0)
-    {
-        perror("ioctl:BTN_LEFT");
-        exit(1);
-    }
-
-    if (ioctl(uifd, UI_SET_KEYBIT, BTN_RIGHT) < 0)
-    {
-        perror("ioctl:BTN_RIGHT");
-        exit(1);
-    }
-
-    // apparently evdev needs these
+    // apparently evdev needs these to recognise our device as a mouse
     ioctl(uifd, UI_SET_EVBIT, EV_REL);
     ioctl(uifd, UI_SET_RELBIT, REL_X);
     ioctl(uifd, UI_SET_RELBIT, REL_Y);
@@ -88,34 +122,22 @@ int main(int argc, char** argv)
     uidev.id.version = 11;
 
     if (write(uifd, &uidev, sizeof(uidev)) < 0)
-    {
-        perror("write");
-        goto failexit;
-    }
+        failexit("write /dev/uinput");
 
     if (ioctl(uifd, UI_DEV_CREATE) < 0)
-    {
-        perror("ioctl");
-        goto failexit;
-    }
+        failexit("ioctl uinput create");
 
     /*
      * epoll
      */
     epfd = epoll_create(2);
     if (epfd < 0)
-    {
-        perror("epoll_create");
-        goto failexit;
-    }
+        failexit("epoll_create");
 
     ev.events = EPOLLIN;
     ev.data.fd = mfd;
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, mfd, &ev) == -1)
-    {
-        perror("epoll_ctl");
-        goto failexit;
-    }
+        failexit("epoll_ctl_add");
 
     /*
      * main loop
@@ -125,87 +147,77 @@ int main(int argc, char** argv)
     struct input_event write_buffer[WRITE_BUFFER_COUNT];
     int write_buffer_index = 0;
 
+    struct timeval time;
+
     for (;;)
     {
-        nev = epoll_wait(epfd, events, MAX_EVENTS, btnmask?15:-1);
+        nev = epoll_wait(epfd, events, MAX_EVENTS, btnmask?100:-1);
         if (nev == -1)
-        {
-            perror("epoll_wait");
-            goto failexit;
-        }
-
-//         printf("Got %d events\n", nev);
+            failexit("epoll_wait");
 
         for (int n = 0; n < nev; n++)
         {
             if (read(events[n].data.fd, &ie, sizeof(struct input_event)) < 0)
-            {
-                perror("read");
-                goto failexit;
-            }
+                failexit("read " MOUSEPATH);
 
             if (ie.type == EV_KEY)
             {
                 if (ie.code == BTN_EXTRA)
                 {
-                    printf("Button LeftMash %s\n", ie.value?"down":"up");
+//                     printf("Button LeftMash %s\n", ie.value?"down":"up");
                     btnmask = (btnmask & ~1) | ie.value?1:0;
                 }
                 if (ie.code == BTN_SIDE)
                 {
-                    printf("Button RightMash %s\n", ie.value?"down":"up");
+//                     printf("Button RightMash %s\n", ie.value?"down":"up");
                     btnmask = (btnmask & ~2) | ie.value?2:0;
                 }
             }
         }
 
-        if (btnmask & 1)
+        if (btnmask != 0)
         {
-            // issue left click
+            gettimeofday(&time, NULL);
 
-            // mouse down
-            write_buffer[write_buffer_index].type = EV_KEY;
-            write_buffer[write_buffer_index].code = BTN_LEFT;
-            gettimeofday(&write_buffer[write_buffer_index].time, NULL);
-            write_buffer[write_buffer_index].value = 1;
-            write_buffer_index++;
+            if (btnmask & 1)
+            {
+                // issue 8 left clicks
 
-            // mouse release
-            write_buffer[write_buffer_index].type = EV_KEY;
-            write_buffer[write_buffer_index].code = BTN_LEFT;
-            gettimeofday(&write_buffer[write_buffer_index].time, NULL);
-            write_buffer[write_buffer_index].value = 0;
-            write_buffer_index++;
+                for (int i = 25; i; i--)
+                {
+                    // mouse down
+                    queue_event(EV_KEY, BTN_LEFT, 1, write_buffer, &write_buffer_index, &time);
 
-            printf("L");
+                    // mouse release
+                    queue_event(EV_KEY, BTN_LEFT, 0, write_buffer, &write_buffer_index, &time);
+                }
+
+//                 printf("L");
+            }
+
+            if (btnmask & 2)
+            {
+                // issue 8 right clicks
+
+                for (int i = 25; i; i--)
+                {
+                    // mouse down
+                    queue_event(EV_KEY, BTN_RIGHT, 1, write_buffer, &write_buffer_index, &time);
+
+                    // mouse release
+                    queue_event(EV_KEY, BTN_RIGHT, 0, write_buffer, &write_buffer_index, &time);
+                }
+
+//                 printf("R");
+            }
+
+            // send buffered events
+            if (write_buffer_index > 0)
+                if (write(uifd, write_buffer, sizeof(write_buffer[0]) * write_buffer_index) < 0)
+                    failexit("write uinput event");
+
+            write_buffer_index = 0;
         }
-
-        if (btnmask & 2)
-        {
-            // issue right click
-
-            // mouse down
-            write_buffer[write_buffer_index].type = EV_KEY;
-            write_buffer[write_buffer_index].code = BTN_RIGHT;
-            gettimeofday(&write_buffer[write_buffer_index].time, NULL);
-            write_buffer[write_buffer_index].value = 1;
-            write_buffer_index++;
-
-            // mouse release
-            write_buffer[write_buffer_index].type = EV_KEY;
-            write_buffer[write_buffer_index].code = BTN_RIGHT;
-            gettimeofday(&write_buffer[write_buffer_index].time, NULL);
-            write_buffer[write_buffer_index].value = 0;
-            write_buffer_index++;
-
-            printf("R");
-        }
-
-        // send buffered events
-        if (write_buffer_index > 0)
-            if (write(uifd, write_buffer, sizeof(write_buffer[0]) * write_buffer_index) < 0)
-                goto failexit;
-        write_buffer_index = 0;
     }
 
     ioctl(uifd, UI_DEV_DESTROY);
@@ -215,16 +227,4 @@ int main(int argc, char** argv)
     close(mfd);
 
     return 0;
-
-failexit:
-    // FIXME: this is ugly as sin. I know it's wrong, I did it anyway, I'm  sorry
-
-    if (uifd)
-        ioctl(uifd, UI_DEV_DESTROY);
-
-    close(epfd);
-    close(uifd);
-    close(mfd);
-
-    exit(1);
 }
