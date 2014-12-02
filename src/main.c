@@ -27,16 +27,26 @@ struct input_event ie;
 
 #define MAX_EVENTS 8
 
-int time_increment_and_copy(struct timeval* time, struct timeval* buffer, unsigned int incr)
+int time_increment_and_copy(struct timeval* time, struct timeval* buffer, unsigned int incr_usec)
 {
-    if ((sizeof(incr) == 32) && (sizeof(time->tv_usec) == 32))
+    if ((sizeof(incr_usec) == 32) && (sizeof(time->tv_usec) == 32))
     {
-        if ((time->tv_usec & 1UL<<31) && (incr & 1UL<<31))
+        if ((time->tv_usec & 1UL<<31) && (incr_usec & 1UL<<31))
         {
             // add will overflow and we won't know
             // instead, subtract half maxint from each then add, and increment seconds
-            time->tv_usec = (time->tv_usec - (1UL<<31)) + (incr - (1UL<<31));
+            time->tv_usec = (time->tv_usec - (1UL<<31)) + (incr_usec - (1UL<<31));
             time->tv_sec ++;
+        }
+        else
+        {
+            // add might overflow, but we'll know
+            time->tv_usec += incr_usec;
+            if (time->tv_usec > 1000000)
+            {
+                time->tv_usec -= 1000000;
+                time->tv_sec ++;
+            }
         }
     }
     else
@@ -56,7 +66,7 @@ void queue_event(int type, int code, int value, struct input_event* queue, int* 
     queue[*queue_index].code = code;
     queue[*queue_index].value = value;
 
-    time_increment_and_copy(time, &queue[*queue_index].time, 2000000);
+    time_increment_and_copy(time, &queue[*queue_index].time, 2000);
 
     (*queue_index)++;
 }
@@ -151,7 +161,7 @@ int main(int argc, char** argv)
 
     for (;;)
     {
-        nev = epoll_wait(epfd, events, MAX_EVENTS, btnmask?100:-1);
+        nev = epoll_wait(epfd, events, MAX_EVENTS, btnmask?25:-1);
         if (nev == -1)
             failexit("epoll_wait");
 
@@ -183,7 +193,7 @@ int main(int argc, char** argv)
             {
                 // issue 8 left clicks
 
-                for (int i = 25; i; i--)
+                for (int i = 5; i; i--)
                 {
                     // mouse down
                     queue_event(EV_KEY, BTN_LEFT, 1, write_buffer, &write_buffer_index, &time);
@@ -199,7 +209,7 @@ int main(int argc, char** argv)
             {
                 // issue 8 right clicks
 
-                for (int i = 25; i; i--)
+                for (int i = 5; i; i--)
                 {
                     // mouse down
                     queue_event(EV_KEY, BTN_RIGHT, 1, write_buffer, &write_buffer_index, &time);
