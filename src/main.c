@@ -23,9 +23,9 @@ uint8_t btnmask = 0;
 
 struct input_event ie;
 
-#define MOUSEPATH "/dev/input/by-id/usb-Logitech_USB_Receiver-if01-event-mouse"
+#define MOUSEPATH "/dev/input/by-id/usb-Logitech_USB_Receiver-if02-event-mouse"
 
-#define MAX_EVENTS 8
+#define MAX_EVENTS 1
 
 int time_increment_and_copy(struct timeval* time, struct timeval* buffer, unsigned int incr_usec)
 {
